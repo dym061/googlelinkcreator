@@ -1090,7 +1090,7 @@ class App:
         lbl.place(relx=0.5, rely=0.96, anchor="center")
         self._flash_w = lbl
         self.root.after(ms, lambda: lbl.destroy() if lbl.winfo_exists() else None)
-
+ 
     def _on_close(self):
         self._save_data(backup=False)
         self._save_settings()
