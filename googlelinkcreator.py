@@ -6,7 +6,7 @@ Build, save and manage Google search URLs visually.
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
-import json, os, sys, webbrowser, urllib.parse
+import json, os, re, sys, webbrowser, urllib.parse
 import copy, threading, time, shutil
 from datetime import datetime, timedelta
 
@@ -332,11 +332,12 @@ class App:
         self._div(p)
 
         # ── Required terms ────────────────────────────────────────────────────
-        self._sh(p, "REQUIRED TERMS",
-                 "Each term/phrase must appear (AND'd)")
+        self._sh(p, "AND GROUPS",
+                 "Comma-separated terms per group → (a OR b)  ·  Groups are AND-joined")
         self.and_frame = tk.Frame(p, bg=BG)
         self.and_frame.pack(fill="x", padx=10, pady=2)
-        neon_btn(p, "+  Add Required Term", self._add_and_row, small=True
+        self._add_and_row()  # default empty group
+        neon_btn(p, "+  Add AND Group", self._add_and_row, small=True
                  ).pack(anchor="w", padx=12, pady=(2,6))
         self._div(p)
 
@@ -427,6 +428,31 @@ class App:
         ent.bind("<KeyRelease>", lambda _: self._rebuild_url())
         ent.pack(side="left", fill="x", expand=True, ipady=4)
 
+        def edit_group():
+            current = self._get_val(rd)
+            val = simpledialog.askstring(
+                "Edit Group",
+                "Edit comma-separated terms for this group:",
+                initialvalue=current,
+                parent=self.root,
+            )
+            if val is None:
+                return
+            ent.delete(0, "end")
+            txt = val.strip()
+            if txt:
+                ent.insert(0, txt)
+                ent.configure(fg=WHITE)
+            else:
+                ent.insert(0, placeholder)
+                ent.configure(fg=MUTED)
+            self._rebuild_url()
+
+        tk.Button(inner, text="✎", font=FS, bg=SURF2, fg=MUTED,
+                  activebackground=SURF2, activeforeground=ACCENT,
+                  relief="flat", bd=0, cursor="hand2",
+                  command=edit_group, padx=4).pack(side="left", padx=(0, 2))
+
         exact_var = tk.BooleanVar()
         tk.Checkbutton(inner, text='""', variable=exact_var, font=FS,
                         bg=SURF2, fg=MUTED, activebackground=SURF2,
@@ -449,7 +475,7 @@ class App:
         self._make_row(self.or_frame, self.or_rows, "term1, term2, term3 ...")
 
     def _add_and_row(self):
-        self._make_row(self.and_frame, self.and_rows, "required phrase or word")
+        self._make_row(self.and_frame, self.and_rows, "term1, term2, term3 ...")
 
     def _add_excl_row(self):
         self._make_row(self.excl_frame, self.excl_rows, "word to exclude")
@@ -475,7 +501,11 @@ class App:
         for rd in self.and_rows:
             raw = self._get_val(rd)
             if not raw: continue
-            parts.append(f'"{raw}"' if rd["exact"].get() else raw)
+            terms = [t.strip() for t in raw.split(",") if t.strip()]
+            if not terms: continue
+            if rd["exact"].get():
+                terms = [f'"{t}"' for t in terms]
+            parts.append(f"({' OR '.join(terms)})" if len(terms) > 1 else terms[0])
 
         q = " AND ".join(parts) if parts else ""
 
@@ -692,6 +722,7 @@ class App:
         btns = tk.Frame(row, bg=SURF2)
         btns.pack(side="right", padx=5, pady=4)
         neon_btn(btns, "↗", lambda l=lnk: webbrowser.open(l["url"]),      small=True).pack(side="left", padx=1)
+        neon_btn(btns, "⤴", lambda l=lnk: self._load_link_into_builder(l), small=True).pack(side="left", padx=1)
         neon_btn(btns, "✎", lambda l=lnk: self._edit_link(l),              small=True).pack(side="left", padx=1)
         neon_btn(btns, "✕", lambda l=lnk: self._delete_link(l), danger=True, small=True).pack(side="left", padx=1)
 
@@ -774,8 +805,145 @@ class App:
             win.destroy()
 
         br = tk.Frame(win, bg=BG); br.grid(row=2, column=0, columnspan=2, pady=12)
+        neon_btn(br, "Edit in Builder", lambda l=lnk: (self._load_link_into_builder(l), win.destroy())).pack(side="left", padx=6)
         neon_btn(br, "Save Changes", save).pack(side="left", padx=6)
         neon_btn(br, "Cancel",       win.destroy, danger=True).pack(side="left", padx=6)
+
+    def _split_top_level(self, text, token):
+        parts, buf = [], []
+        depth = 0
+        i = 0
+        upper = text.upper()
+        token_u = token.upper()
+        tl = len(token)
+        while i < len(text):
+            ch = text[i]
+            if ch == '"':
+                buf.append(ch)
+                i += 1
+                while i < len(text):
+                    buf.append(text[i])
+                    if text[i] == '"' and text[i - 1] != "\\":
+                        i += 1
+                        break
+                    i += 1
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")" and depth > 0:
+                depth -= 1
+            if depth == 0 and upper[i:i+tl] == token_u:
+                before_ok = i == 0 or text[i-1].isspace()
+                after_ok = i + tl >= len(text) or text[i+tl].isspace()
+                if before_ok and after_ok:
+                    part = "".join(buf).strip()
+                    if part:
+                        parts.append(part)
+                    buf = []
+                    i += tl
+                    continue
+            buf.append(ch)
+            i += 1
+        tail = "".join(buf).strip()
+        if tail:
+            parts.append(tail)
+        return parts
+
+    def _strip_outer_parens(self, text):
+        s = text.strip()
+        if len(s) >= 2 and s[0] == "(" and s[-1] == ")":
+            depth = 0
+            for i, ch in enumerate(s):
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0 and i != len(s) - 1:
+                        return s
+            return s[1:-1].strip()
+        return s
+
+    def _parse_group_terms(self, text):
+        body = self._strip_outer_parens(text)
+        terms = [self._strip_outer_parens(x).strip() for x in self._split_top_level(body, "OR")]
+        terms = [t for t in terms if t]
+        exact = bool(terms) and all(t.startswith('"') and t.endswith('"') for t in terms)
+        cleaned = [t[1:-1].strip() if t.startswith('"') and t.endswith('"') else t for t in terms]
+        return cleaned, exact
+
+    def _set_group_rows(self, collection, frame, values, placeholder):
+        for rd in list(collection):
+            rd["frame"].destroy()
+        collection.clear()
+        if not values:
+            values = [{"terms": [], "exact": False}]
+        for item in values:
+            rd = self._make_row(frame, collection, placeholder)
+            terms = item.get("terms", [])
+            if terms:
+                rd["entry"].delete(0, "end")
+                rd["entry"].insert(0, ", ".join(terms))
+                rd["entry"].configure(fg=WHITE)
+            rd["exact"].set(item.get("exact", False))
+
+    def _load_link_into_builder(self, lnk):
+        try:
+            pr = urllib.parse.urlparse(lnk["url"])
+            qv = urllib.parse.parse_qs(pr.query)
+            q = qv.get("q", [""])[0].strip()
+            if not q:
+                messagebox.showwarning("Unsupported", "This link does not contain a Google q= query.")
+                return
+
+            q_no_site = q
+            site = ""
+            m = re.search(r"\s+site:(\S+)\s*$", q_no_site)
+            if m:
+                site = m.group(1)
+                q_no_site = q_no_site[:m.start()].strip()
+
+            excl_rows = []
+            for m_ex in re.finditer(r'(?<!\S)-("[^"]+"|\S+)', q_no_site):
+                token = m_ex.group(1).strip()
+                exact = token.startswith('"') and token.endswith('"')
+                if exact:
+                    token = token[1:-1].strip()
+                excl_rows.append({"terms": [token], "exact": exact})
+            q_main = re.sub(r'(?<!\S)-("[^"]+"|\S+)', '', q_no_site).strip()
+
+            parts = self._split_top_level(q_main, "AND")
+            groups = []
+            for part in parts:
+                p = part.strip()
+                if not p:
+                    continue
+                terms, exact = self._parse_group_terms(p)
+                if terms:
+                    groups.append({"terms": terms, "exact": exact})
+
+            # Keep the first half as OR groups and second half as AND groups if both exist.
+            split = len(groups) if len(groups) <= 1 else max(1, len(groups) // 2)
+            or_groups = groups[:split]
+            and_groups = groups[split:] if len(groups) > split else []
+
+            self._set_group_rows(self.or_rows, self.or_frame, or_groups, "term1, term2, term3 ...")
+            self._set_group_rows(self.and_rows, self.and_frame, and_groups, "term1, term2, term3 ...")
+
+            for rd in list(self.excl_rows):
+                rd["frame"].destroy()
+            self.excl_rows.clear()
+            for ex in excl_rows:
+                rd = self._make_row(self.excl_frame, self.excl_rows, "word to exclude")
+                rd["entry"].delete(0, "end")
+                rd["entry"].insert(0, ex["terms"][0])
+                rd["entry"].configure(fg=WHITE)
+                rd["exact"].set(ex["exact"])
+
+            self.site_var.set(site)
+            self._rebuild_url()
+            self._flash(f"Loaded '{lnk['name']}' into builder")
+        except Exception as ex:
+            messagebox.showerror("Parse Error", f"Could not load link into builder.\n\n{ex}")
 
     def _delete_link(self, lnk):
         if self.settings.get("confirm_delete"):
