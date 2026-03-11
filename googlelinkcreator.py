@@ -143,6 +143,7 @@ class App:
         self.and_rows     = []
         self.excl_rows    = []
         self._drag_state  = {}
+        self._editing_link_id = None
 
         self._load_data()
         self._load_settings()
@@ -390,8 +391,18 @@ class App:
         neon_btn(ar, "⎘  Copy URL",        self._copy_url).pack(side="left", padx=(0,5))
         neon_btn(ar, "↗  Open in Browser", self._open_preview).pack(side="left", padx=(0,5))
         tk.Frame(ar, bg=BORDER, width=1, height=24).pack(side="left", padx=5)
-        neon_btn(ar, "＋  Save to List",   self._save_to_list).pack(side="left", padx=(0,5))
+        self._save_btn = neon_btn(ar, "＋  Save to List", self._save_or_update_link)
+        self._save_btn.pack(side="left", padx=(0,5))
         neon_btn(ar, "✕  Clear",           self._clear_builder, danger=True).pack(side="left")
+
+    def _set_editing_link(self, link_id=None):
+        self._editing_link_id = link_id
+        if not hasattr(self, "_save_btn"):
+            return
+        if link_id:
+            self._save_btn.configure(text="⟳  Update Link")
+        else:
+            self._save_btn.configure(text="＋  Save to List")
 
     def _sh(self, parent, title, hint=""):
         """Section header."""
@@ -564,11 +575,25 @@ class App:
         if url: webbrowser.open(url)
         else: messagebox.showwarning("No URL", "Build a URL first.")
 
-    def _save_to_list(self):
+    def _save_or_update_link(self):
         url = self._build_url()
         if not url:
             messagebox.showwarning("No URL", "Build a URL first.")
             return
+
+        if self._editing_link_id:
+            target = next((l for l in self.links if l["id"] == self._editing_link_id), None)
+            if target:
+                self._push_undo()
+                target["url"] = url
+                target["modified"] = datetime.now().isoformat()
+                self._refresh_list()
+                if self.settings.get("auto_save"):
+                    self._save_data()
+                self._flash(f"Updated: {target['name']}")
+                return
+            self._set_editing_link(None)
+
         name = simpledialog.askstring("Save Link", "Enter a name for this link:", parent=self.root)
         if not name: return
         self._push_undo()
@@ -585,6 +610,7 @@ class App:
     def _clear_builder(self):
         if not messagebox.askyesno("Clear", "Clear all query fields?", parent=self.root):
             return
+        self._set_editing_link(None)
         for rd in list(self.or_rows):   rd["frame"].destroy()
         for rd in list(self.and_rows):  rd["frame"].destroy()
         for rd in list(self.excl_rows): rd["frame"].destroy()
@@ -940,6 +966,7 @@ class App:
                 rd["exact"].set(ex["exact"])
 
             self.site_var.set(site)
+            self._set_editing_link(lnk["id"])
             self._rebuild_url()
             self._flash(f"Loaded '{lnk['name']}' into builder")
         except Exception as ex:
@@ -950,6 +977,8 @@ class App:
             if not messagebox.askyesno("Delete", f"Delete  \"{lnk['name']}\"?", parent=self.root):
                 return
         self._push_undo()
+        if self._editing_link_id == lnk["id"]:
+            self._set_editing_link(None)
         self.links = [l for l in self.links if l["id"] != lnk["id"]]
         self._refresh_list()
         if self.settings.get("auto_save"): self._save_data()
